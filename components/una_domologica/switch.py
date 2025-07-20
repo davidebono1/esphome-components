@@ -38,15 +38,7 @@ async def to_code(config):
 
     for sw_conf in config[CONF_SWITCHES]:
         sw = cg.new_Pvariable(sw_conf[CONF_ID])
-        # Possibly set a name if you have a set_name(...)
-        # cg.add(sw.set_name(sw_conf[CONF_NAME]))
-        
-        # -- do NOT register it as a component, remove the line below --
-        # await cg.register_component(sw, sw_conf)
-        
-        # If you also don’t want the “App.register_switch()” behavior from standard ESPHome,  
-        # do not call "await switch.register_switch(sw, sw_conf)" either.  
-        # Instead, just keep your own registration code:
         cg.add(sw.set_parent(var))
         cg.add(sw.set_relay_number(sw_conf[CONF_RELAY_NUMBER]))
-        cg.add(var.register_switch(sw, sw_conf[CONF_RELAY_NUMBER]))
+        cg.add(sw.set_name(sw_conf[CONF_NAME]))
+        await switch.register_switch(sw, sw_conf)
