@@ -36,7 +36,7 @@ async def to_code(config):
     parent = await cg.get_variable(config[CONF_UART_ID])
     cg.add(var.set_uart_parent(parent))
 
-    from esphome.components.switch import RestoreMode
+    from esphome.components.switch import RESTORE_MODES
 
     for sw_conf in config[CONF_SWITCHES]:
         sw = cg.new_Pvariable(sw_conf[CONF_ID])
@@ -48,6 +48,6 @@ async def to_code(config):
         if "disabled_by_default" not in sw_conf:
             sw_conf["disabled_by_default"] = False
         if "restore_mode" not in sw_conf:
-            sw_conf["restore_mode"] = RestoreMode.NO_RESTORE
+            sw_conf["restore_mode"] = RESTORE_MODES["RESTORE_DEFAULT_OFF"]
     
         await switch.register_switch(sw, sw_conf)
