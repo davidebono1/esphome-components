@@ -41,4 +41,7 @@ async def to_code(config):
         cg.add(sw.set_parent(var))
         cg.add(sw.set_relay_number(sw_conf[CONF_RELAY_NUMBER]))
         cg.add(sw.set_name(sw_conf[CONF_NAME]))
+    
+        sw_conf.setdefault("disabled_by_default", False)
+    
         await switch.register_switch(sw, sw_conf)
