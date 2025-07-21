@@ -42,6 +42,9 @@ async def to_code(config):
         cg.add(sw.set_relay_number(sw_conf[CONF_RELAY_NUMBER]))
         cg.add(sw.set_name(sw_conf[CONF_NAME]))
     
-        sw_conf.setdefault("disabled_by_default", False)
+        # Explicitly ensure 'disabled_by_default' exists
+        if "disabled_by_default" not in sw_conf:
+            sw_conf["disabled_by_default"] = False
     
         await switch.register_switch(sw, sw_conf)
+
