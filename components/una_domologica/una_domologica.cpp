@@ -89,10 +89,6 @@ void UnaDomologica::setup() {
 }
 
 void UnaDomologica::loop() {
-  if (App.is_ota_running()) {
-    // Suspend polling or UART comm during OTA
-    return;
-  }
   const uint32_t now = millis();
   if (!poll_in_progress_ && (now - last_poll_ >= poll_interval_)) {
     send_poll_request_();
