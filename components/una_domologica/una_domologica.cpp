@@ -132,6 +132,9 @@ void UnaDomologica::loop() {
   this->handle_incoming_data_();
   const uint32_t now = millis();
 
+  if (this->phase_ == Phase::ColdProbe && now < BOOT_DELAY)
+    return;  // give WiFi/API time to come up so the bring-up logs are visible
+
   switch (this->phase_) {
     case Phase::ColdProbe:
       // first frame after boot: bare "30" at ctr 0 - exactly the frame Mini

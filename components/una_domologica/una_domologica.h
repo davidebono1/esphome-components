@@ -52,6 +52,7 @@ class UnaDomologica : public Component {
   static const uint32_t PREDISC_WAIT = 200;
   static const uint32_t RANGE_WAIT = 600;
   static const uint32_t MISSES_BEFORE_REDISCOVER = 60;
+  static const uint32_t BOOT_DELAY = 5000;  // let WiFi/API come up so bring-up logs are visible
 
   uart::UARTComponent *uart_parent_{nullptr};
 
