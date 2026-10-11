@@ -1,233 +1,208 @@
-#include "esphome/core/log.h"
 #include "una_domologica.h"
+#include "esphome/core/helpers.h"
 
 namespace esphome {
 namespace una_domologica {
 
-static const char *TAG = "una_domologica.switch";
+static const char *TAG = "una_domologica";
 
-typedef struct {
-  uint8_t destination[3];
-  uint8_t counter;
-} DeviceCounter;
+static const uint8_t FRAME_START0 = 0x10;
+static const uint8_t FRAME_START1 = 0x00;
+static const uint8_t FRAME_END = 0x02;
+static const uint8_t MASTER_ADDR[3] = {0xFF, 0x00, 0x01};
 
+static const uint8_t CMD_STATUS = 0x30;  // status probe, answered by all device types
+
+// per-destination sequence counter table (the device echoes it back)
 #define MAX_DEVICES 10
-static DeviceCounter device_counters[MAX_DEVICES];
-static int num_devices = 0;
+static uint8_t device_counters_addr[MAX_DEVICES][3];
+static uint8_t device_counters_val[MAX_DEVICES];
+static int num_device_counters = 0;
 
-// Helper function to calculate CRC (adjust as per your protocol)
-uint16_t calculate_crc(const uint8_t *data, size_t length) {
+static uint8_t get_counter(const uint8_t *destination) {
+  for (int i = 0; i < num_device_counters; i++) {
+    if (memcmp(device_counters_addr[i], destination, 3) == 0) {
+      device_counters_val[i] = (device_counters_val[i] + 1) % 256;
+      return device_counters_val[i];
+    }
+  }
+  if (num_device_counters < MAX_DEVICES) {
+    memcpy(device_counters_addr[num_device_counters], destination, 3);
+    device_counters_val[num_device_counters] = 0;
+    num_device_counters++;
+  }
+  return 0;
+}
+
+static uint16_t calculate_crc(const uint8_t *data, size_t length) {
   uint16_t crc = 0xFFFF;
-  uint16_t poly = 0xA001;  // Polynomial for CRC-16
   for (size_t i = 0; i < length; i++) {
     crc ^= data[i];
     for (int j = 0; j < 8; j++) {
-      if (crc & 0x0001) {
-        crc = (crc >> 1) ^ poly;
-      } else {
-        crc = crc >> 1;
-      }
+      crc = (crc & 0x0001) ? (crc >> 1) ^ 0xA001 : (crc >> 1);
     }
   }
-  return crc ^ 0x0000;  // Final XOR value
+  return crc;
 }
 
-// Function to get the message counter for a device
-uint8_t get_counter(const uint8_t *destination) {
-  for (int i = 0; i < num_devices; i++) {
-    if (memcmp(device_counters[i].destination, destination, 3) == 0) {
-      device_counters[i].counter = (device_counters[i].counter + 1) % 256;
-      return device_counters[i].counter;
-    }
-  }
-  if (num_devices < MAX_DEVICES) {
-    memcpy(device_counters[num_devices].destination, destination, 3);
-    device_counters[num_devices].counter = 0;
-    num_devices++;
-    return 0;
-  }
-  return 0;  // If max devices reached, return 0
-}
-
-// Function to construct a message (adjust as per your protocol)
-void construct_message(const uint8_t *destination, const uint8_t *payload, size_t payload_length, uint8_t *message, size_t *message_length) {
+// Build "10 00 <len> <dst[3]> FF 00 01 <ctr> <payload> <crc_hi> <crc_lo> 02".
+// Returns false if it does not fit in message_size.
+static bool construct_message(const uint8_t *destination, const uint8_t *payload, size_t payload_length,
+                              uint8_t *message, size_t message_size, size_t *message_length) {
+  if (payload_length + 13 > message_size)
+    return false;
   uint8_t counter = get_counter(destination);
-  message[0] = 16;  // Start byte
-  message[1] = 0;
-  message[2] = payload_length + 13;  // Message length
-  memcpy(&message[3], destination, 3);  // Destination address
-  message[6] = 255;  // Source address (assuming 255)
-  message[7] = 0;
-  message[8] = 1;  // Packet type
-  message[9] = counter;  // Counter
-  memcpy(&message[10], payload, payload_length);  // Payload
+  message[0] = FRAME_START0;
+  message[1] = FRAME_START1;
+  message[2] = payload_length + 13;
+  memcpy(&message[3], destination, 3);
+  memcpy(&message[6], MASTER_ADDR, 3);
+  message[9] = counter;
+  memcpy(&message[10], payload, payload_length);
   uint16_t crc = calculate_crc(message, payload_length + 10);
-  message[10 + payload_length] = (crc >> 8) & 0xFF;  // CRC high byte
-  message[11 + payload_length] = crc & 0xFF;         // CRC low byte
-  message[12 + payload_length] = 2;  // End byte
+  message[10 + payload_length] = (crc >> 8) & 0xFF;  // CRC high byte first
+  message[11 + payload_length] = crc & 0xFF;
+  message[12 + payload_length] = FRAME_END;
   *message_length = 13 + payload_length;
+  return true;
 }
 
-// Implementation of UnaDomologica class methods
+void UnaDomologica::set_device_address(uint32_t address) {
+  this->device_address_[0] = (address >> 16) & 0xFF;
+  this->device_address_[1] = (address >> 8) & 0xFF;
+  this->device_address_[2] = address & 0xFF;
+}
 
 void UnaDomologica::dump_config() {
   ESP_LOGCONFIG(TAG, "Una Domologica:");
+  ESP_LOGCONFIG(TAG, "  Device address: %02X:%02X:%02X", this->device_address_[0], this->device_address_[1],
+                this->device_address_[2]);
   ESP_LOGCONFIG(TAG, "  Poll interval: %u ms", this->poll_interval_);
   ESP_LOGCONFIG(TAG, "  Poll timeout: %u ms", this->poll_timeout_);
 }
 
 void UnaDomologica::register_switch(RelaySwitch *relay_switch, uint8_t relay_number) {
-  relay_switches_.push_back({relay_switch, relay_number});
+  this->relay_switches_.push_back({relay_switch, relay_number});
 }
 
 void UnaDomologica::setup() {
   if (this->uart_parent_ == nullptr) {
     ESP_LOGE(TAG, "UART parent not set!");
     this->mark_failed();
-    return;
   }
 }
 
 void UnaDomologica::loop() {
+  if (this->uart_parent_ == nullptr)
+    return;
   const uint32_t now = millis();
-  if (!poll_in_progress_ && (now - last_poll_ >= poll_interval_)) {
-    send_poll_request_();
-    poll_in_progress_ = true;
-    poll_start_time_ = now;
-    last_poll_ = now;
+  if (!this->poll_in_progress_ && (now - this->last_poll_ >= this->poll_interval_)) {
+    this->send_poll_request_();
+    this->poll_in_progress_ = true;
+    this->poll_start_time_ = now;
+    this->last_poll_ = now;
   }
-  if (poll_in_progress_ && (now - poll_start_time_ >= poll_timeout_)) {
-    poll_in_progress_ = false;
+  if (this->poll_in_progress_ && (now - this->poll_start_time_ >= this->poll_timeout_)) {
+    this->poll_in_progress_ = false;
     ESP_LOGW(TAG, "Poll timeout");
   }
-  while (uart_parent_->available()) {
-    handle_incoming_data_();
-  }
+  this->handle_incoming_data_();
 }
 
+// Feed UART bytes into the assembly buffer and try to close frames off it.
 void UnaDomologica::handle_incoming_data_() {
-  while (uart_parent_->available() && receive_index_ < BUFFER_SIZE) {
-    uint8_t byte;
-    if (!uart_parent_->read_byte(&byte)) {
-      break;  // Failed to read byte
-    }
-    receive_buffer_[receive_index_++] = byte;
-    if (parse_message_()) {
-      poll_in_progress_ = false;
-      receive_index_ = 0;
-      return;
-    }
+  uint8_t byte;
+  while (this->receive_index_ < BUFFER_SIZE && this->uart_parent_->read_byte(&byte)) {
+    this->receive_buffer_[this->receive_index_++] = byte;
+    this->parse_message_();
   }
-  if (receive_index_ >= BUFFER_SIZE) {
-    ESP_LOGW(TAG, "Buffer overflow");
-    receive_index_ = 0;
-    poll_in_progress_ = false;
+  if (this->receive_index_ >= BUFFER_SIZE) {
+    ESP_LOGW(TAG, "Buffer overflow, resyncing");
+    this->receive_index_ = 0;
+    this->poll_in_progress_ = false;
   }
 }
 
-void UnaDomologica::send_poll_request_() {
-  uint8_t message[BUFFER_SIZE];
-  size_t message_length;
-  uint8_t device_address[3] = {0xAF, 0x24, 0x36};  // Replace with your device's address
-  uint8_t query_relays_status[] = {0x30};          // Command to query relay status
-  construct_message(device_address, query_relays_status, sizeof(query_relays_status), message, &message_length);
-  uart_parent_->flush();  // Clear UART buffer
-  uart_parent_->write_array(message, message_length);
-  uart_parent_->flush();  // Ensure message is sent
-}
-
+// Attempt to parse a frame out of the front of the receive buffer.
+// Returns true once a complete (not necessarily valid) frame is consumed.
 bool UnaDomologica::parse_message_() {
-  if (receive_index_ < 13) return false;  // Message not complete yet
+  if (this->receive_index_ < 13)
+    return false;  // shortest possible frame
 
-  // Check for end byte (assuming 2 is the end byte)
-  if (receive_buffer_[receive_index_ - 1] != 2) return false;
-
-  // Validate start of message
-  if (receive_buffer_[0] != 16) {
-    ESP_LOGW(TAG, "Invalid start byte");
-    receive_index_ = 0;
+  // not a frame start yet: drop one byte and resync
+  if (this->receive_buffer_[0] != FRAME_START0 || this->receive_buffer_[1] != FRAME_START1) {
+    this->receive_index_--;
+    memmove(this->receive_buffer_, this->receive_buffer_ + 1, this->receive_index_);
     return false;
   }
 
-  // Retrieve message length
-  size_t message_length = receive_buffer_[2];
-  if (receive_index_ < message_length) return false;  // Wait until full message is received
+  size_t frame_length = this->receive_buffer_[2];
+  if (frame_length < 14 || frame_length > BUFFER_SIZE) {
+    // bogus length byte: drop the first byte and resync
+    this->receive_index_--;
+    memmove(this->receive_buffer_, this->receive_buffer_ + 1, this->receive_index_);
+    return false;
+  }
+  if (this->receive_index_ < frame_length)
+    return false;  // wait for the full frame
 
-  // Validate CRC
-  uint16_t received_crc = (receive_buffer_[message_length - 3] << 8) | receive_buffer_[message_length - 2];
-  uint16_t calculated_crc = calculate_crc(receive_buffer_, message_length - 3);
-  if (received_crc != calculated_crc) {
+  // a complete length-delimited frame is in front of the buffer: consume it
+  // either way, valid or not
+  const uint8_t *f = this->receive_buffer_;
+  uint16_t crc_calc = calculate_crc(f, frame_length - 3);
+  bool crc_ok = f[frame_length - 1] == FRAME_END && f[frame_length - 3] == (crc_calc >> 8) &&
+                f[frame_length - 2] == (crc_calc & 0xFF);
+  // device -> master replies carry FF 00 01 (us) in bytes 3..5 and the device
+  // address in bytes 6..8. Our own TX echoes carry the device address there
+  // and are rejected here, even though their CRC is valid.
+  bool dir_ok = f[3] == MASTER_ADDR[0] && f[4] == MASTER_ADDR[1] && f[5] == MASTER_ADDR[2];
+
+  size_t payload_length = frame_length - 13;
+  if (crc_ok && dir_ok && payload_length > 0) {
+    const uint8_t *payload = &f[10];
+    ESP_LOGD(TAG, "Reply from %02X:%02X:%02X ctr=%02X: %s", f[6], f[7], f[8], f[9],
+             format_hex_pretty(payload, payload_length).c_str());
+    this->poll_in_progress_ = false;
+    // NOTE: the status payload layout (FF FF 80 00 80*16 for the relay board)
+    // is not decoded yet, so we deliberately do not publish switch states
+    // from replies. Switches are optimistic: they publish what we send.
+  } else if (!crc_ok) {
     ESP_LOGW(TAG, "Invalid checksum");
-    receive_index_ = 0;
-    return false;
+  } else if (!dir_ok) {
+    ESP_LOGD(TAG, "Ignoring non-reply frame (own echo or foreign traffic)");
   }
 
-  // Extract relay states from the message
-  // Adjust the index based on your protocol
-  // Assuming the state byte is immediately after the header
-  uint8_t payload_start = 10;  // After header and before CRC
-  size_t payload_length = message_length - payload_start - 3;  // Exclude CRC and end byte
-  
-  if (payload_length == 0) {
-    ESP_LOGW(TAG, "Empty payload");
-    receive_index_ = 0;
-    return false;
-  }
-  
-  uint8_t *payload = &receive_buffer_[payload_start];
-
-  // Assuming the first byte of the payload is the state byte
-  uint8_t current_state = payload[0];
-
-  if (current_state != last_received_state_) {
-    last_received_state_ = current_state;
-    update_switch_states_(current_state);
-  }
-
-  receive_index_ = 0;  // Reset buffer after successful parse
+  size_t consumed = frame_length;
+  this->receive_index_ -= consumed;
+  memmove(this->receive_buffer_, this->receive_buffer_ + consumed, this->receive_index_);
   return true;
 }
 
-void UnaDomologica::update_switch_states_(uint8_t state_byte) {
-  for (const auto &relay_info : relay_switches_) {
-    bool state = (state_byte >> (relay_info.relay_number - 1)) & 0x01;
-    relay_info.relay_switch->update_state(state);
-  }
+bool UnaDomologica::send_frame_(const uint8_t *payload, size_t payload_length) {
+  uint8_t message[BUFFER_SIZE];
+  size_t message_length;
+  if (!construct_message(this->device_address_, payload, payload_length, message, sizeof(message), &message_length))
+    return false;
+  this->uart_parent_->write_array(message, message_length);
+  this->uart_parent_->flush();  // wait until the frame is fully on the wire
+  return true;
+}
+
+void UnaDomologica::send_poll_request_() {
+  this->send_frame_(&CMD_STATUS, 1);
 }
 
 void UnaDomologica::send_command_(uint8_t relay_number, bool state) {
-  uint8_t message[BUFFER_SIZE];
-  size_t message_length;
-  uint8_t device_address[3] = {0xAF, 0x24, 0x36};  // Replace with your device's address
-
-  // Command to set relay state: 0x31, relay number, state (0x01 for ON, 0x00 for OFF)
-  uint8_t set_state[] = {
-    0x31,
-    relay_number,
-    state ? 0x01 : 0x00
-  };
-
-  construct_message(device_address, set_state, sizeof(set_state), message, &message_length);
-
-  if (this->uart_parent_ != nullptr) {
-    uart_parent_->flush();  // Clear UART buffer
-    this->uart_parent_->write_array(message, message_length);
-    uart_parent_->flush();  // Ensure message is sent
-  }
+  // set relay state
+  uint8_t set_state[3] = {0x31, relay_number, static_cast<uint8_t>(state ? 0x01 : 0x00)};
+  this->send_frame_(set_state, sizeof(set_state));
 }
-
-// Implementation of RelaySwitch class methods
 
 void RelaySwitch::write_state(bool state) {
-  if (parent_ != nullptr) {
-    parent_->send_command_(relay_number_, state);
-  }
-}
-
-void RelaySwitch::update_state(bool state) {
-  if (state != this->state) {
-    this->publish_state(state);
-  }
+  // optimistic: publish what we asked for; replies are not decoded yet
+  this->publish_state(state);
+  if (this->parent_ != nullptr)
+    this->parent_->send_command_(this->relay_number_, state);
 }
 
 }  // namespace una_domologica
