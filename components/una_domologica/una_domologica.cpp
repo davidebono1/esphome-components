@@ -241,6 +241,7 @@ void UnaDomologica::loop() {
 void UnaDomologica::handle_incoming_data_() {
   uint8_t byte;
   while (this->receive_index_ < BUFFER_SIZE && this->uart_parent_->read_byte(&byte)) {
+    ESP_LOGV(TAG, "RX byte %02X (idx %u)", byte, (unsigned) this->receive_index_);
     this->receive_buffer_[this->receive_index_++] = byte;
     this->parse_message_();
   }
@@ -298,7 +299,7 @@ bool UnaDomologica::parse_message_() {
     }
     this->poll_in_progress_ = false;
   } else if (!crc_ok) {
-    ESP_LOGW(TAG, "Invalid checksum");
+    ESP_LOGW(TAG, "Invalid checksum, frame: %s", format_hex_pretty(f, frame_length).c_str());
   } else if (!dir_ok) {
     ESP_LOGD(TAG, "Ignoring non-reply frame (own echo or foreign traffic)");
   }
@@ -316,6 +317,8 @@ bool UnaDomologica::send_frame_(const uint8_t *destination, const uint8_t *paylo
   if (!construct_message(destination, payload, payload_length, ctr_override, message, sizeof(message),
                          &message_length))
     return false;
+  ESP_LOGD(TAG, "TX to %02X:%02X:%02X ctr=%02X: %s", destination[0], destination[1], destination[2], message[9],
+           format_hex_pretty(payload, payload_length).c_str());
   this->uart_parent_->write_array(message, message_length);
   this->uart_parent_->flush();  // wait until the frame is fully on the wire
   return true;
